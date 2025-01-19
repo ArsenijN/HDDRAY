@@ -36,8 +36,8 @@ Repair mode:
 - if no errors occured and latency doesn't exceed specified limits, go to the next sector
 
 Workout mode:
-- works only after running "" mode
-- reads listed sectors from ".txt" and "trains" this sectors
+- works only after running any other mode
+- reads listed sectors from  `list of recovered sectors.txt` and "trains" this sectors
 - optionally bad sectors can be "trained" (usually this will not restore this sector, but you can try)
 - unstable sectors will be "trained" and if successed - listed as "good/healthy"
 
@@ -48,4 +48,6 @@ F1 mode:
 - [please add more details]
 
 Regenerator mode:
+- works just like repair mode but have other repair settings
 - [I forgot what it do]
+- [need to rewrite the code]
