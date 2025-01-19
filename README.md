@@ -8,17 +8,19 @@ Info about this version:
 - Features like "repair" mode working now fine with big LBAs
 - Fixed "max_latency" isuue: code did not recognize hangs
 
-Todo:
+Todo: the todo list only applies to the latest version, on which the work is being done, for the release see the info provided by the release itself
 
-- [ ] Autocreation of settings.ini (if missing)
+- [x] Harddrive locking (sometimes there are errors due to this problem)
+- [x] Better error handling
+- [ ] Autocreation of `settings.ini` (if missing)
 - [ ] Full test of all functions on very big sizes of drives (need a physical bad drive)
-- [ ] Better error handling
 - [ ] Compatibility for UNIX systems
 - [ ] Faster analysis of the sectors (by reading couple of sectors at once instead one-by-one)
 - [ ] Better UI
 - [ ] Help page inside the code
 - [ ] Wiki page on GitHub
-- [ ] Harddrive locking (sometimes there are errors due to this problem)
+- [ ] Automatic elevation to administrator privileges at startup
+- [ ] Handling of insufficient space left in the code place (system just can't write anything to the `list of recovered sectors.txt` because drive was full)
 
 ### About
 HDDRAY have 4 modes:
