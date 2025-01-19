@@ -19,12 +19,19 @@ def read_settings():
         'min_sector': int(config['DEFAULT'].get('min_sector', 0)),
         'max_sector': int(config['DEFAULT'].get('max_sector', 0)),
         'regenerator_reads': int(config['DEFAULT'].get('regenerator_reads', 32)),
+        'regenerator_sector_write': int(config['DEFAULT'].get('regenerator_sector_write', 8)),
+        'regenerator_sector_read': int(config['DEFAULT'].get('regenerator_sector_read', 1)),
+        'regenerator_sector_attempts': int(config['DEFAULT'].get('regenerator_sector_attempts', 4)),
         'f1_sector_write': int(config['DEFAULT'].get('f1_sector_write', 3)),
         'f1_sector_read': int(config['DEFAULT'].get('f1_sector_read', 5)),
         'f1_sector_attempts': int(config['DEFAULT'].get('f1_sector_attempts', 3)),
         'repair_sector_write': int(config['DEFAULT'].get('repair_sector_write', 3)),
         'repair_sector_read': int(config['DEFAULT'].get('repair_sector_read', 5)),
         'repair_sector_attempts': int(config['DEFAULT'].get('repair_sector_attempts', 3)),
+        'mode': int(config['DEFAULT'].get('mode', 1)),
+        'drive_number': int(config['DEFAULT'].get('drive_number', 1)),
+        'auto_mode': int(config['DEFAULT'].get('auto_mode', 1)),
+        'error_use_handle': int(config['DEFAULT'].get('error_use_handle', 3))  # New setting for retry attempts
     }
     return settings
 
@@ -50,30 +57,39 @@ def list_raw_drives():
         print(f"Error listing drives: {e}")
         return []
 
-def select_drive():
-    """Prompt user to select a raw drive."""
+def select_drive(settings):
+    """Automatically or manually select a drive based on the settings."""
     drives = list_raw_drives()
     if not drives:
         print("No drives found.")
         return None
 
-    print("What drive to use:")
-    for i, (device_id, model, size) in enumerate(drives, start=1):
-        print(f"{i}. {model} ({size}GB) [{device_id}]")
+    if settings['auto_mode']:
+        drive_index = settings['drive_number'] - 1  # Convert to 0-based index
+        if 0 <= drive_index < len(drives):
+            device_id, model, size = drives[drive_index]
+            print(f"Attention: Using drive {drive_index + 1} ({model}, {size}GB) [{device_id}]")
+            time.sleep(5)  # Wait for 5 seconds
+            return device_id
+        print("Invalid drive number in settings.")
+        return None
+    else:
+        print("What drive to use:")
+        for i, (device_id, model, size) in enumerate(drives, start=1):
+            print(f"{i}. {model} ({size}GB) [{device_id}]")
+        choice = int(input("Enter the drive number: ")) - 1
+        if 0 <= choice < len(drives):
+            return drives[choice][0]
+        print("Invalid choice.")
+        return None
 
-    choice = int(input("Enter the drive number: ")) - 1
-    if 0 <= choice < len(drives):
-        return drives[choice][0]
-    print("Invalid choice.")
-    return None
-
-def read_sector_raw(drive, sector):
-    """Read a raw sector."""
+def open_drive(drive, access_mode):
+    """Open a drive with the specified access mode and exclusive access."""
     try:
         handle = windll.kernel32.CreateFileW(
             drive,  # Raw drive path
-            0x80000000,  # GENERIC_READ
-            0,  # No sharing
+            access_mode,  # Access mode
+            0,  # No sharing (exclusive access)
             None,
             3,  # OPEN_EXISTING
             0,
@@ -81,58 +97,88 @@ def read_sector_raw(drive, sector):
         )
         if handle == -1:
             raise WinError()
-
-        buffer = create_string_buffer(SECTOR_SIZE)
-        distance_to_move = c_ulonglong(sector * SECTOR_SIZE)
-        if not windll.kernel32.SetFilePointerEx(handle, distance_to_move, None, 0):
-            raise WinError()
-
-        bytes_read = c_ulonglong(0)
-        start_time = time.time()  # Start timing the read operation
-        if not windll.kernel32.ReadFile(handle, buffer, SECTOR_SIZE, byref(bytes_read), None):
-            raise WinError()
-        end_time = time.time()  # End timing the read operation
-        latency = (end_time - start_time) * 1000  # Convert to milliseconds
-
-        windll.kernel32.CloseHandle(handle)
-        return True, buffer.raw, latency
+        return handle
     except WinError as e:
-        print(f"Error reading sector {sector}: {e}")
-        return False, None, None
+        print(f"Error opening drive {drive}: {e}")
+        return None
 
-def write_sector_raw(drive, sector, pattern):
-    """Write a raw sector with the specified pattern."""
-    try:
-        handle = windll.kernel32.CreateFileW(
-            drive,  # Raw drive path
-            0xC0000000,  # GENERIC_READ | GENERIC_WRITE
-            0,  # No sharing
-            None,
-            3,  # OPEN_EXISTING
-            0,
-            None,
-        )
-        if handle == -1:
-            raise WinError()
-
-        buffer = create_string_buffer(pattern * (SECTOR_SIZE // len(pattern)))
-        distance_to_move = c_ulonglong(sector * SECTOR_SIZE)
-        if not windll.kernel32.SetFilePointerEx(handle, distance_to_move, None, 0):
-            raise WinError()
-
-        bytes_written = c_ulonglong(0)
-        if not windll.kernel32.WriteFile(handle, buffer, SECTOR_SIZE, byref(bytes_written), None):
-            raise WinError()
-
+def close_drive(handle):
+    """Close the drive handle."""
+    if handle:
         windll.kernel32.CloseHandle(handle)
-        return True
-    except Exception as e:
-        print(f"Error writing sector {sector}: {e}")
-        return False
 
-def verify_sector(drive, sector, pattern):
+def read_sector_raw(drive, sector, retries):
+    """Read a raw sector with retry mechanism."""
+    for attempt in range(retries):
+        handle = open_drive(drive, 0x80000000)  # GENERIC_READ
+        if not handle:
+            if attempt < retries - 1:
+                time.sleep(1)  # Wait a bit before retrying
+                continue
+            else:
+                return False, None, None
+
+        try:
+            buffer = create_string_buffer(SECTOR_SIZE)
+            distance_to_move = c_ulonglong(sector * SECTOR_SIZE)
+            if not windll.kernel32.SetFilePointerEx(handle, distance_to_move, None, 0):
+                raise WinError()
+
+            bytes_read = c_ulonglong(0)
+            start_time = time.time()  # Start timing the read operation
+            if not windll.kernel32.ReadFile(handle, buffer, SECTOR_SIZE, byref(bytes_read), None):
+                raise WinError()
+            end_time = time.time()  # End timing the read operation
+            latency = (end_time - start_time) * 1000  # Convert to milliseconds
+
+            close_drive(handle)
+            return True, buffer.raw, latency
+        except PermissionError as e:
+            print(f"Error reading sector {sector}: {e}")
+            close_drive(handle)
+            if attempt < retries - 1:
+                time.sleep(1)  # Wait a bit before retrying
+            else:
+                return False, None, None
+        except WinError as e:
+            print(f"Error reading sector {sector}: {e}")
+            close_drive(handle)
+            return False, None, None
+
+def write_sector_raw(drive, sector, pattern, retries):
+    """Write a raw sector with retry mechanism."""
+    for attempt in range(retries):
+        handle = open_drive(drive, 0xC0000000)  # GENERIC_READ | GENERIC_WRITE
+        if not handle:
+            if attempt < retries - 1:
+                time.sleep(1)  # Wait a bit before retrying
+                continue
+            else:
+                return False
+
+        try:
+            buffer = create_string_buffer(pattern * (SECTOR_SIZE // len(pattern)))
+            distance_to_move = c_ulonglong(sector * SECTOR_SIZE)
+            if not windll.kernel32.SetFilePointerEx(handle, distance_to_move, None, 0):
+                raise WinError()
+
+            bytes_written = c_ulonglong(0)
+            if not windll.kernel32.WriteFile(handle, buffer, SECTOR_SIZE, byref(bytes_written), None):
+                raise WinError()
+
+            close_drive(handle)
+            return True
+        except Exception as e:
+            print(f"Error writing sector {sector}: {e}")
+            close_drive(handle)
+            if attempt < retries - 1:
+                time.sleep(1)  # Wait a bit before retrying
+            else:
+                return False
+
+def verify_sector(drive, sector, pattern, retries):
     """Verify if the sector contains the pattern."""
-    success, data, latency = read_sector_raw(drive, sector)
+    success, data, latency = read_sector_raw(drive, sector, retries)
     if success and data == pattern * (SECTOR_SIZE // len(pattern)):
         return True, latency
     return False, latency
@@ -142,14 +188,15 @@ def repair_sector(settings, drive, sector, patterns, verbose=True):
     max_repair_writes = settings['repair_sector_write']
     max_repair_reads = settings['repair_sector_read']
     max_latency = settings['max_latency']
+    retries = settings['error_use_handle']
 
     for attempt in range(max_repair_attempts):
         for pattern in patterns:
             for _ in range(max_repair_writes):
-                write_sector_raw(drive, sector, pattern)
+                write_sector_raw(drive, sector, pattern, retries)
 
         for _ in range(max_repair_reads):
-            success, latency = verify_sector(drive, sector, pattern)
+            success, latency = verify_sector(drive, sector, pattern, retries)
             if success and latency <= max_latency:
                 return True, attempt + 1
             elif latency > max_latency:
@@ -162,7 +209,6 @@ def repair_sector(settings, drive, sector, patterns, verbose=True):
 
 def f1_mode(settings, drive):
     print(f"Running f1 mode on drive {drive}...")
-    pattern_cycle = 0
     patterns = [b'\x55', b'\xAA']  # Binary patterns
 
     min_sector = settings['min_sector']
@@ -171,6 +217,7 @@ def f1_mode(settings, drive):
     f1_sector_read = settings['f1_sector_read']
     f1_sector_attempts = settings['f1_sector_attempts']
     max_latency = settings['max_latency']
+    retries = settings['error_use_handle']
 
     if max_sector == 0:
         max_sector = (128 * 1024 * 1024) // SECTOR_SIZE
@@ -181,11 +228,11 @@ def f1_mode(settings, drive):
         while attempts < f1_sector_attempts:
             for pattern in patterns:
                 for _ in range(f1_sector_write):
-                    write_sector_raw(drive, sector, pattern)
+                    write_sector_raw(drive, sector, pattern, retries)
 
             success = True
             for _ in range(f1_sector_read):
-                verified, latency = verify_sector(drive, sector, pattern)
+                verified, latency = verify_sector(drive, sector, pattern, retries)
                 if not verified or latency > max_latency:
                     success = False
                     break
@@ -209,6 +256,7 @@ def recovery_mode(settings, drive):
     repair_sector_read = settings['repair_sector_read']
     repair_sector_attempts = settings['repair_sector_attempts']
     max_latency = settings['max_latency']
+    retries = settings['error_use_handle']
 
     if max_sector == 0:
         max_sector = (128 * 1024 * 1024) // SECTOR_SIZE
@@ -216,7 +264,7 @@ def recovery_mode(settings, drive):
     for sector in range(min_sector, max_sector):
         print(f"Processing sector {sector}...")
         # First attempt to read the sector
-        success, data, latency = read_sector_raw(drive, sector)
+        success, data, latency = read_sector_raw(drive, sector, retries)
         if success and latency <= max_latency:
             # Sector read successfully within allowed latency, no repair needed
             status = "+"
@@ -241,6 +289,7 @@ def regenerator_mode(settings, drive):
     regenerator_sector_read = settings['regenerator_sector_read']
     regenerator_sector_attempts = settings['regenerator_sector_attempts']
     max_latency = settings['max_latency']
+    retries = settings['error_use_handle']
 
     if max_sector == 0:
         max_sector = (128 * 1024 * 1024) // SECTOR_SIZE
@@ -263,16 +312,14 @@ def workout_mode(settings, drive):
 
     with open(recovered_sectors_file, 'r') as f:
         for line in f:
-            if line.strip().startswith("Legend"):
-                continue
             parts = line.split("|")
-            if len(parts) < 8:
-                continue
+            if len(parts) < 7 or not parts[0].strip().isdigit():
+                continue  # Skip header or invalid lines
 
             sector = int(parts[0].strip())
             status = parts[1].strip()
-            if status == "+" or (test_unstable and status == "!"):
-                repair_sector(settings, drive, sector, 0)
+            if status == "-" or (test_unstable and status == "!"):
+                repair_sector(settings, drive, sector, [b'\x55', b'\xAA'])
 
 def main():
     settings = read_settings()
@@ -282,16 +329,31 @@ def main():
         with open(recovered_sectors_file, 'w') as f:
             f.write("Sector | Status | Attempts | Writes | Reads | Max Attempts | Notes\n")
 
-    print("Select mode:")
-    print("1. Recovery mode")
-    print("2. Workout mode")
-    print("3. f1 mode")
-    print("4. Regenerator mode")
-    choice = input("Enter your choice: ")
+    drive = select_drive(settings)
+    if not drive:
+        print("Failed to select drive.")
+        return
 
-    if choice in ['1', '2', '3', '4']:
-        drive = select_drive()
-        if drive:
+    if settings['auto_mode']:
+        mode = settings['mode']
+        if mode == 1:
+            recovery_mode(settings, drive)
+        elif mode == 2:
+            workout_mode(settings, drive)
+        elif mode == 3:
+            f1_mode(settings, drive)
+        elif mode == 4:
+            regenerator_mode(settings, drive)
+        else:
+            print("Invalid mode in settings.")
+    else:
+        print("Select mode:")
+        print("1. Recovery mode")
+        print("2. Workout mode")
+        print("3. f1 mode")
+        print("4. Regenerator mode")
+        choice = input("Enter your choice: ")
+        if choice in ['1', '2', '3', '4']:
             if choice == '1':
                 recovery_mode(settings, drive)
             elif choice == '2':
@@ -300,10 +362,8 @@ def main():
                 f1_mode(settings, drive)
             elif choice == '4':
                 regenerator_mode(settings, drive)
-    else:
-        print("Invalid choice.")
+        else:
+            print("Invalid choice.")
 
 if __name__ == "__main__":
     main()
-
-### Version: VTC16.8rev6
